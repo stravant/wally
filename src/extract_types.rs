@@ -1,4 +1,3 @@
-
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
@@ -494,4 +493,252 @@ pub fn extract_types(package_path: &PathBuf) -> ExtractTypesResult {
     };
 
     parse_types(&init_contents)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_line_comment() {
+        let input = "code -- comment\nmore code";
+        let expected = "code \nmore code";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_strip_block_comment() {
+        let input = "code --[[ block comment ]] more";
+        let expected = "code  more";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_strip_block_comment_with_equals() {
+        let input = "code --[=[ block comment ]=] more";
+        let expected = "code  more";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_strip_double_quote_string() {
+        let input = r#"code "export type Foo" more"#;
+        let expected = "code  more";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_strip_single_quote_string() {
+        let input = r#"code 'export type Foo' more"#;
+        let expected = "code  more";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_strip_template_string() {
+        let input = "code `export type Foo` more";
+        let expected = "code  more";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_strip_block_string() {
+        let input = "code [[ block string ]] more";
+        let expected = "code  more";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_strip_block_string_with_equals() {
+        let input = "code [=[ block string ]=] more";
+        let expected = "code  more";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_strip_escaped_quotes() {
+        let input = r#"code "escaped \" quote" more"#;
+        let expected = "code  more";
+        assert_eq!(strip_comments_and_strings(input), expected);
+    }
+
+    #[test]
+    fn test_parse_simple_export_type() {
+        let input = "export type Foo = string";
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.statements[0].name, "Foo");
+        assert!(result.statements[0].is_exported);
+        assert_eq!(result.statements[0].type_params.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_export_type_with_params() {
+        let input = "export type Foo<T, U> = Bar<T, U>";
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.statements[0].name, "Foo");
+        assert_eq!(result.statements[0].type_params.len(), 2);
+        assert_eq!(result.statements[0].type_params[0].name, "T");
+        assert_eq!(result.statements[0].type_params[1].name, "U");
+        assert!(!result.statements[0].type_params[0].is_pack);
+        assert!(!result.statements[0].type_params[1].is_pack);
+    }
+
+    #[test]
+    fn test_parse_export_type_with_parameter_pack() {
+        let input = "export type Foo<T...> = Bar<T...>";
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.statements[0].type_params.len(), 1);
+        assert_eq!(result.statements[0].type_params[0].name, "T");
+        assert!(result.statements[0].type_params[0].is_pack);
+    }
+
+    #[test]
+    fn test_parse_export_type_with_default() {
+        let input = "export type Foo<T = string> = Bar<T>";
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.statements[0].type_params.len(), 1);
+        assert_eq!(result.statements[0].type_params[0].name, "T");
+        assert_eq!(result.statements[0].type_params[0].default, Some("string".to_string()));
+    }
+
+    #[test]
+    fn test_parse_non_exported_type() {
+        let input = "type Foo = string";
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_multiple_types() {
+        let input = "export type Foo = string\nexport type Bar = number";
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 2);
+        assert_eq!(result.statements[0].name, "Foo");
+        assert_eq!(result.statements[1].name, "Bar");
+    }
+
+    #[test]
+    fn test_parse_with_comments() {
+        let input = "-- comment\nexport type Foo = string -- inline comment";
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.statements[0].name, "Foo");
+    }
+
+    #[test]
+    fn test_parse_ignores_type_in_string() {
+        let input = r#"local x = "export type Fake = string"
+export type Real = number"#;
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.statements[0].name, "Real");
+    }
+
+    #[test]
+    fn test_forwarding_statement_simple() {
+        let mut stmt = ExportStatement::new();
+        stmt.name = "Foo".to_string();
+        stmt.is_exported = true;
+        let forwarding = stmt.to_forwarding_statement("Module");
+        assert_eq!(forwarding, "export type Foo = Module.Foo");
+    }
+
+    #[test]
+    fn test_forwarding_statement_with_params() {
+        let mut stmt = ExportStatement::new();
+        stmt.name = "Foo".to_string();
+        stmt.is_exported = true;
+        stmt.type_params.push(TypeParam {
+            name: "T".to_string(),
+            is_pack: false,
+            default: None,
+        });
+        stmt.type_params.push(TypeParam {
+            name: "U".to_string(),
+            is_pack: false,
+            default: Some("string".to_string()),
+        });
+        let forwarding = stmt.to_forwarding_statement("Module");
+        assert_eq!(forwarding, "export type Foo<T, U = string> = Module.Foo<T, U>");
+    }
+
+    #[test]
+    fn test_forwarding_statement_with_parameter_pack() {
+        let mut stmt = ExportStatement::new();
+        stmt.name = "Foo".to_string();
+        stmt.is_exported = true;
+        stmt.type_params.push(TypeParam {
+            name: "T".to_string(),
+            is_pack: true,
+            default: None,
+        });
+        let forwarding = stmt.to_forwarding_statement("Module");
+        assert_eq!(forwarding, "export type Foo<T...> = Module.Foo<T...>");
+    }
+
+    #[test]
+    fn test_format_forwarding_statements() {
+        let mut result = ExtractTypesResult::new();
+        let mut stmt1 = ExportStatement::new();
+        stmt1.name = "Foo".to_string();
+        stmt1.is_exported = true;
+        let mut stmt2 = ExportStatement::new();
+        stmt2.name = "Bar".to_string();
+        stmt2.is_exported = true;
+        result.add_statement(stmt1);
+        result.add_statement(stmt2);
+        
+        let output = result.format_forwarding_statements("Module");
+        assert_eq!(output, "export type Foo = Module.Foo\nexport type Bar = Module.Bar");
+    }
+
+    #[test]
+    fn test_remove_non_exported_defaults() {
+        let input = r#"
+type LocalType = string
+export type Foo<T = LocalType> = Bar<T>
+"#;
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.statements[0].type_params[0].default, None);
+    }
+
+    #[test]
+    fn test_keep_exported_defaults() {
+        let input = r#"
+export type ExportedType = string
+export type Foo<T = ExportedType> = Bar<T>
+"#;
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 2);
+        assert_eq!(result.statements[1].type_params[0].default, Some("ExportedType".to_string()));
+    }
+
+    #[test]
+    fn test_complex_type_params() {
+        let input = "export type Foo<T, U..., V = string, W... = number> = Bar";
+        let result = parse_types(input);
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(result.statements[0].type_params.len(), 4);
+        
+        assert_eq!(result.statements[0].type_params[0].name, "T");
+        assert!(!result.statements[0].type_params[0].is_pack);
+        assert_eq!(result.statements[0].type_params[0].default, None);
+        
+        assert_eq!(result.statements[0].type_params[1].name, "U");
+        assert!(result.statements[0].type_params[1].is_pack);
+        assert_eq!(result.statements[0].type_params[1].default, None);
+        
+        assert_eq!(result.statements[0].type_params[2].name, "V");
+        assert!(!result.statements[0].type_params[2].is_pack);
+        assert_eq!(result.statements[0].type_params[2].default, Some("string".to_string()));
+        
+        assert_eq!(result.statements[0].type_params[3].name, "W");
+        assert!(result.statements[0].type_params[3].is_pack);
+        assert_eq!(result.statements[0].type_params[3].default, Some("number".to_string()));
+    }
 }
